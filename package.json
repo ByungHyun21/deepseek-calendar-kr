@@ -17,9 +17,6 @@
   "scripts": {
     "check": "node --check client.js && node --check plugin/host.js"
   },
-  "dependencies": {
-    "@deepseek-ai/schemastery": "~3.18.5"
-  },
   "exports": {
     ".": "./plugin/host.js",
     "./client": "./client.js",
@@ -48,10 +45,7 @@
       "platform": "web",
       "inject": [
         "@deepseek-ai/dsh-client-ui-theme",
-        "@deepseek-ai/dsh-client-ui-renderer",
-        "@deepseek-ai/dsh-client-ui-settings",
-        "@deepseek-ai/dsh-client-ui-plugin-manager",
-        "@deepseek-ai/dsh-client-locale"
+        "@deepseek-ai/dsh-client-ui-renderer"
       ]
     }
   }

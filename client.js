@@ -273,40 +273,6 @@ const MQ_COARSE = typeof matchMedia === "function" ? matchMedia("(hover: none) a
 const hasTouch = () => (navigator.maxTouchPoints || 0) > 0 || "ontouchstart" in window;
 const isMobile = () => (!!MQ_COARSE && MQ_COARSE.matches) || (hasTouch() && innerWidth < NARROW);
 
-/* ---------------- 플러그인 관리자 설정 카드 ----------------
-   hideOnMobile 토글 하나만 올리는 최소 React 컴포넌트다. 값은 Host 설정 미러(ConfigForm)를 통해
-   읽고 쓴다(변경하면 바로 저장·적용된다). 이 플러그인의 나머지 부분은 전부 순수 DOM이고, React는 여기서만 쓴다.
-   아래 한/영 문구는 locale/ko.json·locale/en.json의 config.hideOnMobile 항목과 같은 글자다
-   (브라우저는 패키지 안의 JSON을 읽을 수 없으므로 여기에 사본을 둔다). 한쪽을 고치면 다른 쪽도 고칠 것. */
-function settingsCard(React, form, locale) {
-  return function HideOnMobileSetting({ view }) {
-    const snap = React.useSyncExternalStore((fn) => form.subscribe(fn), () => form.getSnapshot(), () => form.getSnapshot());
-    const lang = React.useSyncExternalStore((fn) => locale.subscribe(fn), () => locale.getLocale(), () => locale.getLocale());
-    const [pending, setPending] = React.useState(false);
-    const [error, setError] = React.useState("");
-    const ko = String((lang && lang.active) || "").toLowerCase().startsWith("ko");
-    const saveFailed = ko ? "설정을 저장하지 못했습니다." : "Could not save the setting.";
-    if (view === "summary") return null;   // 목록 한 줄은 플러그인 설명을 그대로 쓴다
-    if (snap.status !== "ready") return React.createElement("p", { role: "status" }, ko ? "설정을 불러오는 중입니다." : "Loading settings…");
-    const change = async (ev) => {
-      setError(""); setPending(true);
-      try {
-        if (!await form.set("hideOnMobile", ev.target.checked)) setError(saveFailed);
-      } catch { setError(saveFailed); }
-      finally { setPending(false); }
-    };
-    return React.createElement("div", { style: { display: "grid", gap: 8 } },
-      React.createElement("label", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 24 } },
-        React.createElement("span", null, ko ? "모바일에서 캘린더 숨기기" : "Hide the calendar on mobile"),
-        React.createElement("input", { type: "checkbox", role: "switch",
-          checked: !snap.value || snap.value.hideOnMobile !== false, disabled: !snap.writable || pending, onChange: change })),
-      React.createElement("p", { style: { margin: 0, opacity: .7 } }, ko
-        ? "터치를 주로 쓰거나 화면이 좁은 기기에서 달력 위젯을 가립니다. 저장된 일정은 그대로 남고, 넓은 화면에서는 다시 나타납니다."
-        : "Hides the widget on touch-first or narrow screens. Saved schedules stay put and the widget returns on wider screens."),
-      error ? React.createElement("p", { role: "alert" }, error) : null);
-  };
-}
-
 /* ---------------- 유틸 ---------------- */
 function createLifetime() {
   let stopped = false;
@@ -393,27 +359,6 @@ function apply(ctx) {
     const fTime = form.querySelector('[name="evtime"]');
     const fSubmit = form.querySelector("[data-submit]");
 
-    /* Host 반쪽의 설정(hideOnMobile)을 설정 미러에서 읽는다.
-       기본값은 Host의 Config 기본값과 같은 true. configForms가 없거나 아직 Host 답장을 받지 못하면
-       (status가 ready가 아니면) true를 그대로 두므로, 설정 화면이 없는 배포에서도 기본 동작은 성립한다.
-       배치 루프(place)가 먼저 .show를 붙일 수 없도록 이 블록을 배치보다 앞에 둔다.
-       값을 바꾸는 것은 설정 카드뿐이고, 여기서는 읽기만 한다 — localStorage의 일정 데이터와는 무관하다. */
-    let hideOnMobile = true;
-    const hideMobile = () => hideOnMobile && isMobile();
-    if (typeof ctx.inject === "function") {
-      ctx.inject(["configForms"], (scope) => {
-        try {
-          const config = scope.configForms.get(PLUGIN_ID);
-          const sync = () => {
-            const snap = config.getSnapshot();
-            if (snap.status === "ready") hideOnMobile = !snap.value || snap.value.hideOnMobile !== false;
-          };
-          scope.effect(() => config.subscribe(sync), PLUGIN_ID + ": config");
-          sync();
-        } catch (e) { console.warn("dsh-calendar config:", e); }
-      });
-    }
-
     /* 달력 렌더 */
     function renderCal() {
       titleEl.textContent = `${viewY}. ${pad2(viewM + 1)}`;
@@ -477,7 +422,7 @@ function apply(ctx) {
       const r = more && more.getBoundingClientRect();
       /* 모바일이면 발판을 찾았어도 보여주지 않는다. 여기가 .show를 붙이는 유일한 자리라,
          진입점(자동 배치)과 패널(#dshcal-root)이 한 번에 막힌다. */
-      const hide = hideMobile();
+      const hide = isMobile();
       const visible = !hide && !!r && r.width > 0 && r.height > 0 && r.top > 120;
       const key = visible ? [Math.round(r.left), Math.round(r.width), Math.round(r.top), innerWidth, innerHeight].join("|") : "hidden";
       if (key !== lastKey) {
@@ -538,7 +483,7 @@ function apply(ctx) {
 
     /* 일정 추가 / 수정 팝업 */
     function openForm(entry) {
-      if (hideMobile()) return;   // 가려진 상태에서는 열지 않는다 (진입점은 display:none으로 이미 막혀 있다)
+      if (isMobile()) return;   // 가려진 상태에서는 열지 않는다 (진입점은 display:none으로 이미 막혀 있다)
       editingId = entry ? entry.id : null;
       fTitle.value = entry ? entry.title : "";
       fDate.value = entry ? entry.date : selected || todayStr();
@@ -581,29 +526,10 @@ function apply(ctx) {
     life.add(() => listeners.delete(refresh));
     life.listen(window, "storage", (ev) => { if (ev.key === STORE_KEY) { entries = loadEntries(); emit(); } });
 
-    /* 플러그인 관리자의 '달력 · 일정' 행에 hideOnMobile 토글 한 개를 붙인다.
-       React·설정 미러·슬롯이 하나라도 없는 배포에서는 카드를 생략하고 위젯은 그대로 두므로,
-       여기서 실패해도 달력을 잃지 않도록 이 조각만 따로 try로 감싼다. */
-    if (typeof ctx.inject === "function") {
-      ctx.inject(["configForms", "slots", "locale"], (scope) => {
-        try {
-          const React = require("react");
-          const config = scope.configForms.get(PLUGIN_ID);
-          scope.effect(() => scope.slots.inject("plugins.row.config", () => scope.slots.register(
-            { name: "plugins.row.config", key: PLUGIN_ID + "#" + PLUGIN_ID },
-            settingsCard(React, config, scope.locale),
-          )), PLUGIN_ID + ": settings");
-        } catch (e) { console.warn("dsh-calendar settings:", e); }
-      });
-    }
-
     renderCal(); renderSel();
   } catch (error) { dispose(); throw error; }
 }
 
-/* 설정 카드(configForms)·슬롯은 exports.inject로 요구하지 않는다. 요구하면 그 서비스를 제공하지 않는
-   배포에서 플러그인 자체가 대기 상태에 빠져 달력까지 사라지므로, ctx.inject로 준비된 뒤에만 붙이고
-   없으면 기본값(hideOnMobile = true)으로 동작시킨다. */
 exports.inject = [];
 exports.apply = apply;
 
