@@ -1,7 +1,7 @@
 {
   "name": "dsh-calendar",
-  "version": "0.3.3",
-  "description": "DSH 사이드바 하단 달력 위젯 + 일정 관리 (기간 일정, 선택 날짜 일정 목록, 공휴일·대체공휴일 표시)",
+  "version": "0.4.0",
+  "description": "DSH 사이드바 하단 달력 위젯 + 일정 관리 (기간 일정, 선택 날짜 일정 목록, 공휴일·대체공휴일 표시, 모바일 숨김 설정)",
   "type": "module",
   "author": "ByungHyun21",
   "license": "MIT",
@@ -14,6 +14,12 @@
   },
   "homepage": "https://github.com/ByungHyun21/deepseek-calendar-kr#readme",
   "main": "./plugin/host.js",
+  "scripts": {
+    "check": "node --check client.js && node --check plugin/host.js"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "~3.18.5"
+  },
   "exports": {
     ".": "./plugin/host.js",
     "./client": "./client.js",
@@ -42,7 +48,10 @@
       "platform": "web",
       "inject": [
         "@deepseek-ai/dsh-client-ui-theme",
-        "@deepseek-ai/dsh-client-ui-renderer"
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-locale"
       ]
     }
   }

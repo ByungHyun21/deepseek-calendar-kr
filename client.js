@@ -253,6 +253,60 @@ body[data-ds-dark-theme] .dshcal-foot button { background: #d97aa826; color: #f0
 body[data-ds-dark-theme] .dshcal-foot button:hover { background: #d97aa83d; }
 `;
 
+/* ---------------- 모바일 판정 ----------------
+   두 신호 중 하나라도 참이면 모바일로 본다.
+     1) 주 입력이 터치: (hover: none) and (pointer: coarse)
+        폰·태블릿은 화면이 넓은 가로 모드여도 숨긴다. 이 위젯은 position: fixed 오버레이라
+        좁은 화면에서 본문 대화를 덮어 가리기 때문이다.
+     2) 터치를 지원하는 기기(navigator.maxTouchPoints)에서 뷰포트가 NARROW보다 좁은 경우
+        태블릿의 '데스크톱 웹사이트' 모드처럼 pointer 미디어쿼리가 fine으로 보고되는 기기를 잡는다.
+   데스크톱에서 창만 좁힌 경우(터치 미지원, maxTouchPoints 0)는 데스크톱으로 남긴다. 근거는 두 가지다.
+     - 사용자가 잠깐 만드는 상태이고, 그 상태에서도 사이드바 발판(findAnchor)이 그대로 있어
+       위젯이 자기 자리에 붙는다.
+     - 이 플러그인은 데스크톱 동작을 바꾸지 않는 것을 전제로 한다. 폭이 좁아지면 위젯 폭도 함께 준다.
+   터치 지원 노트북·컨버터블은 창을 좁히면 2번에 걸려 숨겨진다 — 그 자세는 사실상 태블릿 사용으로 본다.
+   UA 문자열은 스푸핑에 약하고 태블릿·데스크톱 모드를 구분하지 못해 쓰지 않는다.
+   MQ_COARSE.matches는 라이브 값이라 place()가 매 프레임 읽으면 회전·창 크기 변화에 따로 리스너를 두지
+   않아도 따라간다. */
+const NARROW = 768;                       // 이 폭보다 좁으면 '좁은 화면'으로 보는 관용적 분기점
+const MQ_COARSE = typeof matchMedia === "function" ? matchMedia("(hover: none) and (pointer: coarse)") : null;
+const hasTouch = () => (navigator.maxTouchPoints || 0) > 0 || "ontouchstart" in window;
+const isMobile = () => (!!MQ_COARSE && MQ_COARSE.matches) || (hasTouch() && innerWidth < NARROW);
+
+/* ---------------- 플러그인 관리자 설정 카드 ----------------
+   hideOnMobile 토글 하나만 올리는 최소 React 컴포넌트다. 값은 Host 설정 미러(ConfigForm)를 통해
+   읽고 쓴다(변경하면 바로 저장·적용된다). 이 플러그인의 나머지 부분은 전부 순수 DOM이고, React는 여기서만 쓴다.
+   아래 한/영 문구는 locale/ko.json·locale/en.json의 config.hideOnMobile 항목과 같은 글자다
+   (브라우저는 패키지 안의 JSON을 읽을 수 없으므로 여기에 사본을 둔다). 한쪽을 고치면 다른 쪽도 고칠 것. */
+function settingsCard(React, form, locale) {
+  return function HideOnMobileSetting({ view }) {
+    const snap = React.useSyncExternalStore((fn) => form.subscribe(fn), () => form.getSnapshot(), () => form.getSnapshot());
+    const lang = React.useSyncExternalStore((fn) => locale.subscribe(fn), () => locale.getLocale(), () => locale.getLocale());
+    const [pending, setPending] = React.useState(false);
+    const [error, setError] = React.useState("");
+    const ko = String((lang && lang.active) || "").toLowerCase().startsWith("ko");
+    const saveFailed = ko ? "설정을 저장하지 못했습니다." : "Could not save the setting.";
+    if (view === "summary") return null;   // 목록 한 줄은 플러그인 설명을 그대로 쓴다
+    if (snap.status !== "ready") return React.createElement("p", { role: "status" }, ko ? "설정을 불러오는 중입니다." : "Loading settings…");
+    const change = async (ev) => {
+      setError(""); setPending(true);
+      try {
+        if (!await form.set("hideOnMobile", ev.target.checked)) setError(saveFailed);
+      } catch { setError(saveFailed); }
+      finally { setPending(false); }
+    };
+    return React.createElement("div", { style: { display: "grid", gap: 8 } },
+      React.createElement("label", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 24 } },
+        React.createElement("span", null, ko ? "모바일에서 캘린더 숨기기" : "Hide the calendar on mobile"),
+        React.createElement("input", { type: "checkbox", role: "switch",
+          checked: !snap.value || snap.value.hideOnMobile !== false, disabled: !snap.writable || pending, onChange: change })),
+      React.createElement("p", { style: { margin: 0, opacity: .7 } }, ko
+        ? "터치를 주로 쓰거나 화면이 좁은 기기에서 달력 위젯을 가립니다. 저장된 일정은 그대로 남고, 넓은 화면에서는 다시 나타납니다."
+        : "Hides the widget on touch-first or narrow screens. Saved schedules stay put and the widget returns on wider screens."),
+      error ? React.createElement("p", { role: "alert" }, error) : null);
+  };
+}
+
 /* ---------------- 유틸 ---------------- */
 function createLifetime() {
   let stopped = false;
@@ -339,6 +393,27 @@ function apply(ctx) {
     const fTime = form.querySelector('[name="evtime"]');
     const fSubmit = form.querySelector("[data-submit]");
 
+    /* Host 반쪽의 설정(hideOnMobile)을 설정 미러에서 읽는다.
+       기본값은 Host의 Config 기본값과 같은 true. configForms가 없거나 아직 Host 답장을 받지 못하면
+       (status가 ready가 아니면) true를 그대로 두므로, 설정 화면이 없는 배포에서도 기본 동작은 성립한다.
+       배치 루프(place)가 먼저 .show를 붙일 수 없도록 이 블록을 배치보다 앞에 둔다.
+       값을 바꾸는 것은 설정 카드뿐이고, 여기서는 읽기만 한다 — localStorage의 일정 데이터와는 무관하다. */
+    let hideOnMobile = true;
+    const hideMobile = () => hideOnMobile && isMobile();
+    if (typeof ctx.inject === "function") {
+      ctx.inject(["configForms"], (scope) => {
+        try {
+          const config = scope.configForms.get(PLUGIN_ID);
+          const sync = () => {
+            const snap = config.getSnapshot();
+            if (snap.status === "ready") hideOnMobile = !snap.value || snap.value.hideOnMobile !== false;
+          };
+          scope.effect(() => config.subscribe(sync), PLUGIN_ID + ": config");
+          sync();
+        } catch (e) { console.warn("dsh-calendar config:", e); }
+      });
+    }
+
     /* 달력 렌더 */
     function renderCal() {
       titleEl.textContent = `${viewY}. ${pad2(viewM + 1)}`;
@@ -400,7 +475,10 @@ function apply(ctx) {
       if (life.stopped) return;
       const more = findAnchor();
       const r = more && more.getBoundingClientRect();
-      const visible = !!r && r.width > 0 && r.height > 0 && r.top > 120;
+      /* 모바일이면 발판을 찾았어도 보여주지 않는다. 여기가 .show를 붙이는 유일한 자리라,
+         진입점(자동 배치)과 패널(#dshcal-root)이 한 번에 막힌다. */
+      const hide = hideMobile();
+      const visible = !hide && !!r && r.width > 0 && r.height > 0 && r.top > 120;
       const key = visible ? [Math.round(r.left), Math.round(r.width), Math.round(r.top), innerWidth, innerHeight].join("|") : "hidden";
       if (key !== lastKey) {
         lastKey = key;
@@ -410,8 +488,15 @@ function apply(ctx) {
           root.style.left = r.left + "px";
           root.style.width = w + "px";
           root.style.bottom = Math.max(6, innerHeight - r.top + 12) + "px";
-        } else root.classList.remove("show");
+        } else {
+          root.classList.remove("show");
+          /* 회전·창 크기로 모바일로 바뀌는 동안 일정 창이 열려 있으면 같이 닫는다.
+             저장된 일정은 localStorage에 그대로 남고, 닫는 것은 화면에서만 사라지는 것이다. */
+          if (hide && modal.classList.contains("show")) closeModal();
+        }
       }
+      /* 숨겨져도 배치 루프는 계속 돌린다: 좁은 화면에서 다시 넓어졌을 때 앵커를 찾아 그대로 복원하려면
+         다음 프레임의 재판정이 필요하다. (판정만 하고 DOM은 건드리지 않는다.) */
       life.frame(place);
     };
     life.frame(place);
@@ -453,6 +538,7 @@ function apply(ctx) {
 
     /* 일정 추가 / 수정 팝업 */
     function openForm(entry) {
+      if (hideMobile()) return;   // 가려진 상태에서는 열지 않는다 (진입점은 display:none으로 이미 막혀 있다)
       editingId = entry ? entry.id : null;
       fTitle.value = entry ? entry.title : "";
       fDate.value = entry ? entry.date : selected || todayStr();
@@ -495,10 +581,29 @@ function apply(ctx) {
     life.add(() => listeners.delete(refresh));
     life.listen(window, "storage", (ev) => { if (ev.key === STORE_KEY) { entries = loadEntries(); emit(); } });
 
+    /* 플러그인 관리자의 '달력 · 일정' 행에 hideOnMobile 토글 한 개를 붙인다.
+       React·설정 미러·슬롯이 하나라도 없는 배포에서는 카드를 생략하고 위젯은 그대로 두므로,
+       여기서 실패해도 달력을 잃지 않도록 이 조각만 따로 try로 감싼다. */
+    if (typeof ctx.inject === "function") {
+      ctx.inject(["configForms", "slots", "locale"], (scope) => {
+        try {
+          const React = require("react");
+          const config = scope.configForms.get(PLUGIN_ID);
+          scope.effect(() => scope.slots.inject("plugins.row.config", () => scope.slots.register(
+            { name: "plugins.row.config", key: PLUGIN_ID + "#" + PLUGIN_ID },
+            settingsCard(React, config, scope.locale),
+          )), PLUGIN_ID + ": settings");
+        } catch (e) { console.warn("dsh-calendar settings:", e); }
+      });
+    }
+
     renderCal(); renderSel();
   } catch (error) { dispose(); throw error; }
 }
 
+/* 설정 카드(configForms)·슬롯은 exports.inject로 요구하지 않는다. 요구하면 그 서비스를 제공하지 않는
+   배포에서 플러그인 자체가 대기 상태에 빠져 달력까지 사라지므로, ctx.inject로 준비된 뒤에만 붙이고
+   없으면 기본값(hideOnMobile = true)으로 동작시킨다. */
 exports.inject = [];
 exports.apply = apply;
 
