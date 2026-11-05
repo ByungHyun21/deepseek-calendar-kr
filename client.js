@@ -460,8 +460,9 @@ function apply(ctx) {
       /* 접힌 사이드바(발판 폭 ≈56px)에서는 달력이 본문을 덮으므로 숨긴다. */
       const collapsed = !!r && r.width > 0 && r.width < 160;
       const visible = !hide && !collapsed && !!r && r.width > 0 && r.height > 0 && r.top > 120;
-      /* 발판 위로 남는 높이만큼만 쓴다. 창을 줄이면 달력도 함께 줄어 위쪽 버튼을 가리지 않는다. */
-      const availH = Math.max(140, Math.round((r && r.top ? r.top : innerHeight) - 24));
+      /* 발판 위로 남는 높이만큼만 쓴다. 창을 줄이면 달력도 함께 줄어 위쪽 버튼을 가리지 않는다.
+         (위 여유는 최소 96px — 이 값보다 좁아지는 창은 visible 조건에서 이미 걸러진다.) */
+      const availH = Math.max(96, Math.round((r && r.top ? r.top : innerHeight) - 24));
       const key = visible ? [Math.round(r.left), Math.round(r.width), Math.round(r.top), innerWidth, innerHeight, availH].join("|") : "hidden";
       if (key !== lastKey) {
         lastKey = key;
