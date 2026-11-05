@@ -307,6 +307,44 @@ const MQ_COARSE = typeof matchMedia === "function" ? matchMedia("(hover: none) a
 const hasTouch = () => (navigator.maxTouchPoints || 0) > 0 || "ontouchstart" in window;
 const isMobile = () => (!!MQ_COARSE && MQ_COARSE.matches) || (hasTouch() && innerWidth < NARROW);
 
+/* ---------------- 배치 판정 ----------------
+   이 위젯은 position: fixed 오버레이라 사이드바 "위에" 뜬다. 그러니 크기를 뷰포트가 아니라
+   사이드바가 정하게 해야 한다. 창을 세로로 줄였을 때 크기가 그대로여서 위쪽 버튼(플러그인·
+   자동화 작업·작업 대상)과 세션 목록을 가리던 원인은 상한을 `발판.top - 24`로 잡은 것이었다.
+   발판은 화면 맨 아래에 있어 그 값은 사실상 뷰포트 높이이고, 패널 자연 높이(~330px)가 늘
+   그보다 작아 상한이 한 번도 걸리지 않았다.
+
+   그래서 판정 기준을 이렇게 바꾼다.
+     - 아래 경계: 발판 위 8px
+     - 위 경계: 세션 목록 스크롤 영역의 위쪽(없으면 열 상단 + 176px 안전대) → 위쪽 아이콘 줄은 절대 덮지 않는다
+     - 세로 상한: 사이드바 열 높이의 42%, 최대 380px → 창을 줄이면 여기도 같이 줄어든다
+     - 두 경계 사이가 MIN_VIS보다 좁으면 아예 그리지 않는다(그리면 버튼을 가릴 수밖에 없다)
+   DOM은 건드리지 않는 순수 계산이라 테스트로 고정한다. */
+const LAYOUT = { minVis: 200, minPanel: 160, maxPanel: 380, ratio: 0.42, gap: 8, fallbackTop: 176, minWidth: 160 };
+function layoutDecision({ innerWidth, innerHeight, anchor, column, scrollBox, mobile }) {
+  if (mobile) return null;
+  const hasAnchor = anchor && anchor.width > 0 && anchor.height > 0;
+  if (!hasAnchor) return null;
+  /* 접힌 사이드바(발판 폭 ≈56px)에서는 달력이 본문을 덮으므로 그리지 않는다. */
+  if (anchor.width < LAYOUT.minWidth) return null;
+  const width = Math.max(LAYOUT.minWidth, anchor.width);
+  const columnH = column && column.height > 0 ? column.height : innerHeight;
+  const columnTop = column && column.height > 0 ? column.top : 0;
+  const lower = anchor.top - LAYOUT.gap;
+  const upper = scrollBox && scrollBox.height > 0
+    ? Math.max(scrollBox.top + LAYOUT.gap, columnTop + 32)
+    : columnTop + LAYOUT.fallbackTop;
+  const room = Math.round(lower - upper);
+  if (room < LAYOUT.minVis) return null;
+  const availH = Math.max(LAYOUT.minPanel, Math.min(room, LAYOUT.maxPanel, Math.round(columnH * LAYOUT.ratio)));
+  return {
+    left: Math.round(anchor.left),
+    width: Math.round(width),
+    availH,
+    bottom: Math.round(innerHeight - lower),
+  };
+}
+
 /* ---------------- 유틸 ---------------- */
 function createLifetime() {
   let stopped = false;
@@ -449,38 +487,97 @@ function apply(ctx) {
       }
       return best;
     }
+    /* --- 사이드바 실측 --- */
+    /* 발판에서 위로 올라가며 "세로로 긴 사이드바 열"을 찾는다. 열 높이가 위젯 크기의 기준이다. */
+    const findColumn = (anchor) => {
+      let el = anchor && anchor.parentElement;
+      for (let i = 0; el && i < 10; i++, el = el.parentElement) {
+        const b = el.getBoundingClientRect();
+        if (b.height >= innerHeight * 0.6 && b.width > 140 && b.width < innerWidth * 0.5) return el;
+      }
+      return null;
+    };
+    /* 열 안에서 실제로 스크롤되는 가장 큰 영역(세션 목록)을 찾는다. 클래스명은 셸 빌드마다 바뀌므로
+       계산된 스타일(overflow-y)과 scrollHeight로 판별한다. */
+    const findScrollBox = (column) => {
+      let best = null, bestArea = 0;
+      for (const el of column.querySelectorAll("div")) {
+        if (el === root || root.contains(el)) continue;
+        if (!/(auto|scroll)/.test(getComputedStyle(el).overflowY)) continue;
+        const b = el.getBoundingClientRect();
+        if (b.height < 120 || b.width < 120) continue;
+        if (el.scrollHeight <= el.clientHeight + 4) continue;
+        const area = b.width * b.height;
+        if (area > bestArea) { best = el; bestArea = area; }
+      }
+      return best;
+    };
+    let boxEl = null, boxKey = "";
+    const scrollBoxFor = (column) => {
+      const vp = innerWidth + "x" + innerHeight;
+      if (boxEl && boxEl.isConnected && boxKey === vp && column.contains(boxEl)) return boxEl;
+      boxEl = findScrollBox(column); boxKey = vp;
+      return boxEl;
+    };
+    /* 위젯이 목록 위에 뜨므로, 목록 스크롤 영역에 아래 여백을 예약해 마지막 행이 가리지 않게 한다. */
+    let paddedEl = null, paddedOrig = "", padValue = "";
+    const clearReserve = () => {
+      if (paddedEl && paddedEl.isConnected) paddedEl.style.paddingBottom = paddedOrig;
+      paddedEl = null; paddedOrig = ""; padValue = "";
+    };
+    life.add(clearReserve);
+    const reserveSpace = (el, px) => {
+      if (!el) { clearReserve(); return; }
+      if (paddedEl !== el) { clearReserve(); paddedEl = el; paddedOrig = el.style.paddingBottom; }
+      padValue = px + "px";
+      el.style.paddingBottom = padValue;
+    };
+    const rectOf = (el) => {
+      const b = el && el.getBoundingClientRect();
+      return b ? { left: b.left, top: b.top, width: b.width, height: b.height } : null;
+    };
+
     let lastKey = "";
     const place = () => {
       if (life.stopped) return;
       const more = findAnchor();
-      const r = more && more.getBoundingClientRect();
-      /* 모바일이면 발판을 찾았어도 보여주지 않는다. 여기가 .show를 붙이는 유일한 자리라,
-         진입점(자동 배치)과 패널(#dshcal-root)이 한 번에 막힌다. */
-      const hide = isMobile();
-      /* 접힌 사이드바(발판 폭 ≈56px)에서는 달력이 본문을 덮으므로 숨긴다. */
-      const collapsed = !!r && r.width > 0 && r.width < 160;
-      const visible = !hide && !collapsed && !!r && r.width > 0 && r.height > 0 && r.top > 120;
-      /* 발판 위로 남는 높이만큼만 쓴다. 창을 줄이면 달력도 함께 줄어 위쪽 버튼을 가리지 않는다.
-         (위 여유는 최소 96px — 이 값보다 좁아지는 창은 visible 조건에서 이미 걸러진다.) */
-      const availH = Math.max(96, Math.round((r && r.top ? r.top : innerHeight) - 24));
-      const key = visible ? [Math.round(r.left), Math.round(r.width), Math.round(r.top), innerWidth, innerHeight, availH].join("|") : "hidden";
+      const columnEl = more ? findColumn(more) : null;
+      const boxElNow = columnEl ? scrollBoxFor(columnEl) : null;
+      /* 모바일 판정·접힘 판정·경계 계산은 모두 layoutDecision이 한다. 여기가 .show를 붙이는
+         유일한 자리라, 진입점(자동 배치)과 패널(#dshcal-root)이 한 번에 막힌다. */
+      const pick = layoutDecision({
+        innerWidth, innerHeight,
+        anchor: rectOf(more), column: rectOf(columnEl), scrollBox: rectOf(boxElNow),
+        mobile: isMobile(),
+      });
+      const key = pick
+        ? [pick.left, pick.width, pick.availH, pick.bottom, innerWidth, innerHeight, boxElNow ? 1 : 0].join("|")
+        : "hidden";
       if (key !== lastKey) {
         lastKey = key;
-        if (visible) {
+        if (pick) {
           root.classList.add("show");
-          /* 폭은 발판 폭을 따른다. 창 크기와 무관한 208px 하한을 두지 않는다. */
-          const w = Math.max(160, r.width);
-          root.style.left = r.left + "px";
-          root.style.width = w + "px";
-          root.style.setProperty("--dshcal-avail", availH + "px");
-          root.style.bottom = Math.max(6, innerHeight - r.top + 12) + "px";
+          root.style.left = pick.left + "px";
+          root.style.width = pick.width + "px";
+          root.style.bottom = pick.bottom + "px";
+          root.style.setProperty("--dshcal-avail", pick.availH + "px");
+          /* 실제로 그려진 높이만큼만 목록 아래 여백을 예약한다(짧은 달에 과하게 비우지 않는다). */
+          const panelEl = root.firstElementChild;
+          const drawn = panelEl ? Math.round(panelEl.getBoundingClientRect().height) : pick.availH;
+          reserveSpace(boxElNow, Math.min(pick.availH, drawn) + 12);
         } else {
           root.classList.remove("show");
-          /* 회전·창 크기로 모바일로 바뀌는 동안 일정 창이 열려 있으면 같이 닫는다.
+          clearReserve();
+          /* 회전·창 크기로 그릴 수 없게 되는 동안 일정 창이 열려 있으면 같이 닫는다.
              저장된 일정은 localStorage에 그대로 남고, 닫는 것은 화면에서만 사라지는 것이다. */
-          if (!visible && modal.classList.contains("show")) closeModal();
+          if (modal.classList.contains("show")) closeModal();
         }
       }
+      /* 셸이 목록 영역을 다시 그리며 인라인 스타일을 덮을 수 있다. 매 프레임 문자열로만 확인하고
+         필요할 때만 되돌린다(레이아웃 읽기 없음). */
+      if (padValue) {
+        if (paddedEl && paddedEl.style.paddingBottom !== padValue) paddedEl.style.paddingBottom = padValue;
+      } else if (paddedEl) clearReserve();
       /* 숨겨져도 배치 루프는 계속 돌린다: 좁은 화면에서 다시 넓어졌을 때 앵커를 찾아 그대로 복원하려면
          다음 프레임의 재판정이 필요하다. (판정만 하고 DOM은 건드리지 않는다.) */
       life.frame(place);
