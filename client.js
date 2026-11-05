@@ -163,6 +163,11 @@ const CSS = `
 #dshcal-root { position: fixed; z-index: 28; display: none; font-family: "Malgun Gothic", sans-serif;
   color: #26305c; user-select: none; }
 #dshcal-root.show { display: block; }
+/* 도킹 모드: 사이드바 열의 flex 자식으로 발판 바로 위에 앉는다. 레이아웃의 일부라 겹치지 않고,
+   배경·그림자·둥근 모서리를 걷어 사이드바 섹션처럼 보이게 한다. */
+#dshcal-root.docked { position: static; z-index: auto; width: auto; flex: none; box-sizing: border-box; }
+#dshcal-root.docked #dshcal-panel { background: transparent; border: 0; border-top: 1px solid var(--dsw-alias-border-l3);
+  border-radius: 0; box-shadow: none; backdrop-filter: none; padding: 8px 0 6px; }
 #dshcal-panel { background: #fffffff2; border: 1px solid #5f7cf52b; border-radius: 16px;
   box-shadow: 0 8px 28px #5f7cf522; padding: 8px; backdrop-filter: blur(6px); }
 #dshcal-panel { max-height: var(--dshcal-avail, calc(100vh - 24px)); overflow: hidden auto; scrollbar-width: thin; }
@@ -224,6 +229,7 @@ const CSS = `
 #dshcal-add:hover { filter: brightness(1.06); }
 body[data-ds-dark-theme] #dshcal-root { color: #e8ebf5; }
 body[data-ds-dark-theme] #dshcal-panel { background: #22242bf2; border-color: #8fa6ff33; box-shadow: 0 8px 28px #00000059; }
+body[data-ds-dark-theme] #dshcal-root.docked #dshcal-panel { background: transparent; border-color: var(--dsw-alias-border-l3); box-shadow: none; }
 body[data-ds-dark-theme] .dshcal-title { color: #e8ebf5; }
 body[data-ds-dark-theme] .dshcal-day { color: #e8ebf5; }
 body[data-ds-dark-theme] .dshcal-wd span:first-child { color: #ff6b6b; }
@@ -308,39 +314,47 @@ const hasTouch = () => (navigator.maxTouchPoints || 0) > 0 || "ontouchstart" in 
 const isMobile = () => (!!MQ_COARSE && MQ_COARSE.matches) || (hasTouch() && innerWidth < NARROW);
 
 /* ---------------- 배치 판정 ----------------
-   이 위젯은 position: fixed 오버레이라 사이드바 "위에" 뜬다. 그러니 크기를 뷰포트가 아니라
-   사이드바가 정하게 해야 한다. 창을 세로로 줄였을 때 크기가 그대로여서 위쪽 버튼(플러그인·
-   자동화 작업·작업 대상)과 세션 목록을 가리던 원인은 상한을 `발판.top - 24`로 잡은 것이었다.
-   발판은 화면 맨 아래에 있어 그 값은 사실상 뷰포트 높이이고, 패널 자연 높이(~330px)가 늘
-   그보다 작아 상한이 한 번도 걸리지 않았다.
+   이 위젯은 원래 position: fixed 오버레이라 사이드바 "위에" 떠 있었다. 그래서 두 가지 문제가 있었다.
+     (1) 창을 세로로 줄여도 크기가 그대로여서 위쪽 버튼과 세션 목록을 덮었다.
+         상한을 `발판.top - 24`로 잡았는데, 발판은 화면 맨 아래라 그 값이 사실상 뷰포트 높이였고
+         패널 자연 높이(~330px)가 늘 그보다 작아 상한이 한 번도 걸리지 않았다.
+     (2) 떠 있는 카드(불투명 배경 + 그림자 + 둥근 모서리)라 사이드바에 "얹힌" 느낌이 났다.
 
-   그래서 판정 기준을 이렇게 바꾼다.
-     - 아래 경계: 발판 위 8px
-     - 위 경계: 세션 목록 스크롤 영역의 위쪽(없으면 열 상단 + 176px 안전대) → 위쪽 아이콘 줄은 절대 덮지 않는다
-     - 세로 상한: 사이드바 열 높이의 42%, 최대 380px → 창을 줄이면 여기도 같이 줄어든다
-     - 두 경계 사이가 MIN_VIS보다 좁으면 아예 그리지 않는다(그리면 버튼을 가릴 수밖에 없다)
+   그래서 두 가지 배치를 둔다.
+     - docked(기본): 사이드바 열의 flex 자식으로 발판 바로 위에 끼워 넣는다. 레이아웃 일부라
+       겹침이 원천적으로 없고, 세션 목록 영역(flex:1)이 달력 높이만큼 줄어든다.
+       셸이 다시 그려서 노드를 걷어가도 다음 프레임에 스스로 복구한다.
+     - overlay(폴백): 열을 flex로 다루지 못하는 셸이면 예전처럼 fixed로 띄우되,
+       위 경계를 세션 목록 스크롤 영역 위쪽으로 잡아 아이콘 줄을 덮지 않는다.
+   두 모드 모두 세로 상한은 사이드바 열 높이의 42%(최대 380px)라 창을 줄이면 같이 줄어든다.
    DOM은 건드리지 않는 순수 계산이라 테스트로 고정한다. */
-const LAYOUT = { minVis: 200, minPanel: 160, maxPanel: 380, ratio: 0.42, gap: 8, fallbackTop: 176, minWidth: 160 };
-function layoutDecision({ innerWidth, innerHeight, anchor, column, scrollBox, mobile }) {
+const LAYOUT = { minVis: 200, minPanel: 160, maxPanel: 380, ratio: 0.42, gap: 8, fallbackTop: 176, minWidth: 160, minColumn: 320 };
+function layoutDecision({ innerWidth, innerHeight, anchor, column, scrollBox, mobile, dockable }) {
   if (mobile) return null;
   const hasAnchor = anchor && anchor.width > 0 && anchor.height > 0;
   if (!hasAnchor) return null;
   /* 접힌 사이드바(발판 폭 ≈56px)에서는 달력이 본문을 덮으므로 그리지 않는다. */
   if (anchor.width < LAYOUT.minWidth) return null;
-  const width = Math.max(LAYOUT.minWidth, anchor.width);
+  const width = Math.round(Math.max(LAYOUT.minWidth, anchor.width));
   const columnH = column && column.height > 0 ? column.height : innerHeight;
   const columnTop = column && column.height > 0 ? column.top : 0;
+  const availH = Math.max(LAYOUT.minPanel, Math.min(LAYOUT.maxPanel, Math.round(columnH * LAYOUT.ratio)));
+  if (dockable) {
+    /* 흐름 배치: 열이 너무 낮으면 목록이 남지 않으므로 숨긴다. */
+    if (columnH < LAYOUT.minColumn) return null;
+    return { mode: "docked", availH, width, left: 0, bottom: 0 };
+  }
   const lower = anchor.top - LAYOUT.gap;
   const upper = scrollBox && scrollBox.height > 0
     ? Math.max(scrollBox.top + LAYOUT.gap, columnTop + 32)
     : columnTop + LAYOUT.fallbackTop;
   const room = Math.round(lower - upper);
   if (room < LAYOUT.minVis) return null;
-  const availH = Math.max(LAYOUT.minPanel, Math.min(room, LAYOUT.maxPanel, Math.round(columnH * LAYOUT.ratio)));
   return {
+    mode: "overlay",
     left: Math.round(anchor.left),
-    width: Math.round(width),
-    availH,
+    width,
+    availH: Math.max(LAYOUT.minPanel, Math.min(room, availH)),
     bottom: Math.round(innerHeight - lower),
   };
 }
@@ -536,42 +550,84 @@ function apply(ctx) {
       const b = el && el.getBoundingClientRect();
       return b ? { left: b.left, top: b.top, width: b.width, height: b.height } : null;
     };
+    /* --- 도킹(흐름 배치) --- */
+    /* 발판을 감싸는 "열의 직계 자식"을 찾는다. 그 앞에 달력을 끼워 넣으면 발판 바로 위에 앉는다.
+       클래스명은 셸 빌드마다 바뀌므로 계층 구조로만 판별한다. */
+    const footWrapperOf = (column, anchor) => {
+      let el = anchor;
+      while (el && el.parentElement !== column) el = el.parentElement;
+      return el && el.parentElement === column ? el : null;
+    };
+    /* 열이 flex/grid 컨테이너여야 자식 추가로 목록 영역이 자연히 줄어든다. */
+    const isColumnFlow = (el) => {
+      if (!el) return false;
+      const display = getComputedStyle(el).display;
+      return display === "flex" || display === "grid" || display === "inline-flex";
+    };
+    let docked = false;
+    const attach = (pick, columnEl, footEl) => {
+      if (pick.mode === "docked") {
+        /* 셸이 다시 그리며 노드를 걷어가도(또는 발판 노드가 갈려도) 다음 프레임에 스스로 복구한다.
+           이미 제자리면 DOM을 건드리지 않는다. */
+        if (root.parentElement !== columnEl || root.nextElementSibling !== footEl) {
+          columnEl.insertBefore(root, footEl);
+        }
+        if (!docked) { docked = true; root.classList.add("docked"); }
+      } else {
+        if (root.parentElement !== document.body) document.body.append(root);
+        root.classList.add("show");
+        if (docked) { docked = false; root.classList.remove("docked"); }
+      }
+    };
 
     let lastKey = "";
     const place = () => {
       if (life.stopped) return;
       const more = findAnchor();
       const columnEl = more ? findColumn(more) : null;
-      const boxElNow = columnEl ? scrollBoxFor(columnEl) : null;
+      const footEl = columnEl && more ? footWrapperOf(columnEl, more) : null;
+      /* 열이 흐름 컨테이너이고 발판 직계 자식을 찾았을 때만 도킹한다(아니면 오버레이 폴백). */
+      const dockable = !!footEl && isColumnFlow(columnEl);
+      const boxElNow = !dockable && columnEl ? scrollBoxFor(columnEl) : null;
       /* 모바일 판정·접힘 판정·경계 계산은 모두 layoutDecision이 한다. 여기가 .show를 붙이는
          유일한 자리라, 진입점(자동 배치)과 패널(#dshcal-root)이 한 번에 막힌다. */
       const pick = layoutDecision({
         innerWidth, innerHeight,
         anchor: rectOf(more), column: rectOf(columnEl), scrollBox: rectOf(boxElNow),
-        mobile: isMobile(),
+        mobile: isMobile(), dockable,
       });
       const key = pick
-        ? [pick.left, pick.width, pick.availH, pick.bottom, innerWidth, innerHeight, boxElNow ? 1 : 0].join("|")
+        ? [pick.mode, pick.availH, pick.width, pick.left, pick.bottom, innerWidth, innerHeight, boxElNow ? 1 : 0].join("|")
         : "hidden";
       if (key !== lastKey) {
         lastKey = key;
-        if (pick) {
-          root.classList.add("show");
-          root.style.left = pick.left + "px";
-          root.style.width = pick.width + "px";
-          root.style.bottom = pick.bottom + "px";
-          root.style.setProperty("--dshcal-avail", pick.availH + "px");
-          /* 실제로 그려진 높이만큼만 목록 아래 여백을 예약한다(짧은 달에 과하게 비우지 않는다). */
-          const panelEl = root.firstElementChild;
-          const drawn = panelEl ? Math.round(panelEl.getBoundingClientRect().height) : pick.availH;
-          reserveSpace(boxElNow, Math.min(pick.availH, drawn) + 12);
-        } else {
+        if (!pick) {
           root.classList.remove("show");
           clearReserve();
           /* 회전·창 크기로 그릴 수 없게 되는 동안 일정 창이 열려 있으면 같이 닫는다.
              저장된 일정은 localStorage에 그대로 남고, 닫는 것은 화면에서만 사라지는 것이다. */
           if (modal.classList.contains("show")) closeModal();
+        } else {
+          attach(pick, columnEl, footEl);
+          root.classList.add("show");
+          root.style.setProperty("--dshcal-avail", pick.availH + "px");
+          if (pick.mode === "docked") {
+            /* 흐름 배치에서는 위치·폭을 인라인으로 잡지 않는다(열 폭을 그대로 쓴다). */
+            root.style.left = root.style.width = root.style.bottom = "";
+            clearReserve();
+          } else {
+            root.style.left = pick.left + "px";
+            root.style.width = pick.width + "px";
+            root.style.bottom = pick.bottom + "px";
+            /* 실제로 그려진 높이만큼만 목록 아래 여백을 예약한다(짧은 달에 과하게 비우지 않는다). */
+            const panelEl = root.firstElementChild;
+            const drawn = panelEl ? Math.round(panelEl.getBoundingClientRect().height) : pick.availH;
+            reserveSpace(boxElNow, Math.min(pick.availH, drawn) + 12);
+          }
         }
+      } else if (pick && pick.mode === "docked") {
+        /* 셸이 열을 다시 그려 노드가 밀렸을 수 있다. 제자리 확인은 문자열 비교 수준이라 매 프레임 해도 싸다. */
+        attach(pick, columnEl, footEl);
       }
       /* 셸이 목록 영역을 다시 그리며 인라인 스타일을 덮을 수 있다. 매 프레임 문자열로만 확인하고
          필요할 때만 되돌린다(레이아웃 읽기 없음). */

@@ -98,3 +98,33 @@ test("최소 패널 높이는 보장하되 공간보다 크게 그리지 않는�
   assert.equal(pick.availH, api.LAYOUT.minPanel, "42%(126px)보다 최소 높이를 우선한다");
   assert.ok(pick.availH <= 420 - 8, "발판 위 공간을 넘지 않는다");
 });
+
+test("도킹 가능하면 흐름 배치를 고른다(겹침 없음)", () => {
+  const pick = api.layoutDecision({ ...base, dockable: true });
+  assert.equal(pick.mode, "docked", "사이드바 흐름에 끼워 넣는 모드여야 한다");
+  assert.equal(pick.availH, 378);
+  assert.equal(pick.width, 240, "도킹 시에도 폭 기준은 발판 폭");
+});
+
+test("도킹 시에도 세로 상한은 열 높이의 42%", () => {
+  const tall = api.layoutDecision({ ...base, dockable: true });
+  const short = api.layoutDecision({
+    ...base, dockable: true,
+    anchor: { ...base.anchor, top: 490 },
+    column: { top: 0, height: 500 },
+  });
+  assert.equal(short.mode, "docked");
+  assert.equal(short.availH, 210, "500px의 42% = 210px");
+  assert.ok(short.availH < tall.availH, "창을 줄이면 도킹 높이도 줄어든다");
+});
+
+test("도킹 시 열이 320px 미만이면 숨긴다(목록이 남지 않으므로)", () => {
+  const pick = api.layoutDecision({ ...base, dockable: true, column: { top: 0, height: 300 } });
+  assert.equal(pick, null);
+});
+
+test("도킹 불가(열이 흐름 컨테이너가 아님)면 오버레이로 폴백한다", () => {
+  const pick = api.layoutDecision({ ...base, dockable: false });
+  assert.equal(pick.mode, "overlay");
+  assert.ok(pick.availH >= api.LAYOUT.minPanel);
+});
