@@ -2,7 +2,10 @@ window.__ModuleLoader__.load({ id: "dsh-calendar", factory: (require) => {
 const module = { exports: {} }; const exports = module.exports;
 const PLUGIN_ID = "dsh-calendar";
 const SLOT = "__dshCalendarDispose";
-const STORE_KEY = "dsh-calenda...(revoked token)";
+const STORE_KEY = "dsh-calendar:entries:v1";
+/* 0.4.0까지 쓰던 키. 값이 마스킹 사고로 "dsh-calenda...(revoked token)"로 남아 있었고
+   저장 형식은 같다. 읽을 때 새 키로 옮겨 기존 일정이 고아가 되지 않게 한다. */
+const LEGACY_STORE_KEYS = ["dsh-calenda...(revoked token)"];
 const WD = ["일", "월", "화", "수", "목", "금", "토"];
 
 /* ---------------- 공휴일 (「관공서의 공휴일에 관한 규정」 기준) ----------------
@@ -20,19 +23,22 @@ const FIXED_HOLIDAYS = (y) => [
   ["12-25", "성탄절", true],
   ...(y >= 2026 ? [["05-01", "노동절", true], ["07-17", "제헌절", true]] : []),
 ];
-/* [설날, 추석, 부처님 오신 날] 음력 앵커의 양력 날짜. 없는 해는 공휴일 표시만 생략된다. */
+/* [설날, 추석, 부처님 오신 날] 음력 앵커의 양력 날짜. 없는 해는 공휴일 표시만 생략된다.
+   날짜는 KST 기준 신월이 든 날이다. 자정 직후 신월(2027·2028·2030)은 중국(CST) 표와
+   하루 갈리므로 중국 자료를 옮겨 적으면 틀린다. 2028 설날 신월 = 2028-01-27 00:12 KST,
+   2030 설날 신월 = 2030-02-03 01:07 KST (2028은 중국 기준 01-26). */
 const LUNAR_ANCHORS = {
   2024: ["02-10", "09-17", "05-15"],
   2025: ["01-29", "10-06", "05-05"],
   2026: ["02-17", "09-25", "05-24"],
   2027: ["02-07", "09-15", "05-13"],
-  2028: ["01-26", "10-03", "05-02"],
+  2028: ["01-27", "10-03", "05-02"],
   2029: ["02-13", "09-22", "05-20"],
-  2030: ["02-04", "09-12", "05-09"],
+  2030: ["02-03", "09-12", "05-09"],
 };
 
 /* 임기만료에 의한 선거일 (공직선거법 제34조). 새 선거가 정해지면 이 표에 추가한다. */
-const ELECTION_DAYS = { 2026: ["06-03"] };
+const ELECTION_DAYS = { 2024: ["04-10"], 2025: ["06-03"], 2026: ["06-03"], 2028: ["04-12"] };
 
 const dayOfWeek = (k) => { const [y, m, d] = k.split("-").map(Number); return new Date(y, m - 1, d).getDay(); };
 function shiftKey(key, days) {
@@ -88,18 +94,35 @@ function holidayName(key) {
 }
 
 /* ---------------- 일정 저장소 (localStorage) ---------------- */
+/* 저장 값 검증: 손상되거나 손으로 고친 값이 DOM sink로 흘러가지 않게 형태부터 확인한다. */
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const TIME_RE = /^\d{2}:\d{2}$/;
+const ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
+function readStoredJson() {
+  const current = localStorage.getItem(STORE_KEY);
+  if (current !== null) return current;
+  for (const legacy of LEGACY_STORE_KEYS) {
+    const old = localStorage.getItem(legacy);
+    if (old !== null) {
+      /* 마이그레이션: 구 키 → 새 키. 옮기지 못하면(quota 등) 읽기만 하고 다음 기회로 미룬다. */
+      try { localStorage.setItem(STORE_KEY, old); localStorage.removeItem(legacy); } catch {}
+      return old;
+    }
+  }
+  return null;
+}
 function loadEntries() {
   try {
-    const raw = JSON.parse(localStorage.getItem(STORE_KEY) || "[]");
+    const raw = JSON.parse(readStoredJson() || "[]");
     if (!Array.isArray(raw)) return [];
     return raw
-      .filter((e) => e && typeof e.date === "string" && typeof e.title === "string")
+      .filter((e) => e && typeof e.date === "string" && DATE_RE.test(e.date) && typeof e.title === "string")
       .map((e) => ({
-        id: String(e.id || Math.random().toString(36).slice(2, 10)),
+        id: ID_RE.test(String(e.id || "")) ? String(e.id) : Math.random().toString(36).slice(2, 10),
         date: e.date,
-        end: typeof e.end === "string" && e.end > e.date ? e.end : "",
-        time: e.time || "",
-        title: e.title,
+        end: typeof e.end === "string" && DATE_RE.test(e.end) && e.end > e.date ? e.end : "",
+        time: typeof e.time === "string" && TIME_RE.test(e.time) ? e.time : "",
+        title: e.title.slice(0, 200),
       }));
   } catch { return []; }
 }
@@ -107,7 +130,17 @@ let entries = loadEntries();
 const listeners = new Set();
 const sortAll = () => entries.sort((a, b) => (a.date + (a.time || "")).localeCompare(b.date + (b.time || "")));
 function emit() { for (const fn of [...listeners]) { try { fn(); } catch (e) { console.warn("dsh-calendar:", e); } } }
-function persist() { sortAll(); try { localStorage.setItem(STORE_KEY, JSON.stringify(entries)); } catch {} emit(); }
+let lastSaveFailed = false;
+function persist() {
+  sortAll();
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(entries)); lastSaveFailed = false; }
+  catch (error) {
+    /* quota·차단: 조용히 삼키지 않고 한 번만 경고한다(저장된 줄 알았다가 사라지는 일 방지). */
+    if (!lastSaveFailed) console.warn("dsh-calendar: 일정 저장 실패", error);
+    lastSaveFailed = true;
+  }
+  emit();
+}
 function addEntry(date, end, time, title) { entries.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), date, end: end && end > date ? end : "", time: time || "", title }); persist(); }
 function updateEntry(id, patch) { const e = entries.find((x) => x.id === id); if (e) { Object.assign(e, patch); persist(); } }
 function removeEntry(id) { entries = entries.filter((x) => x.id !== id); persist(); }
@@ -132,7 +165,7 @@ const CSS = `
 #dshcal-root.show { display: block; }
 #dshcal-panel { background: #fffffff2; border: 1px solid #5f7cf52b; border-radius: 16px;
   box-shadow: 0 8px 28px #5f7cf522; padding: 8px; backdrop-filter: blur(6px); }
-#dshcal-panel { max-height: calc(100vh - 24px); overflow: hidden auto; scrollbar-width: thin; }
+#dshcal-panel { max-height: var(--dshcal-avail, calc(100vh - 24px)); overflow: hidden auto; scrollbar-width: thin; }
 .dshcal-head { display: flex; align-items: center; justify-content: space-between; margin: 2px 2px 6px; }
 .dshcal-head button { width: 24px; height: 24px; border: 0; border-radius: 8px; background: transparent; cursor: pointer;
   color: #5f7cf5; font-size: 15px; line-height: 1; }
@@ -251,6 +284,7 @@ body[data-ds-dark-theme] #dshcal-card header h2, body[data-ds-dark-theme] .dshca
 body[data-ds-dark-theme] .dshcal-form input { background: #26282d; border-color: #8fa6ff4d; color: #e8ebf5; }
 body[data-ds-dark-theme] .dshcal-foot button { background: #d97aa826; color: #f0a9c6; }
 body[data-ds-dark-theme] .dshcal-foot button:hover { background: #d97aa83d; }
+body[data-ds-dark-theme] #dshcal-card header button { color: #e8ebf5a8; }
 `;
 
 /* ---------------- 모바일 판정 ----------------
@@ -423,21 +457,27 @@ function apply(ctx) {
       /* 모바일이면 발판을 찾았어도 보여주지 않는다. 여기가 .show를 붙이는 유일한 자리라,
          진입점(자동 배치)과 패널(#dshcal-root)이 한 번에 막힌다. */
       const hide = isMobile();
-      const visible = !hide && !!r && r.width > 0 && r.height > 0 && r.top > 120;
-      const key = visible ? [Math.round(r.left), Math.round(r.width), Math.round(r.top), innerWidth, innerHeight].join("|") : "hidden";
+      /* 접힌 사이드바(발판 폭 ≈56px)에서는 달력이 본문을 덮으므로 숨긴다. */
+      const collapsed = !!r && r.width > 0 && r.width < 160;
+      const visible = !hide && !collapsed && !!r && r.width > 0 && r.height > 0 && r.top > 120;
+      /* 발판 위로 남는 높이만큼만 쓴다. 창을 줄이면 달력도 함께 줄어 위쪽 버튼을 가리지 않는다. */
+      const availH = Math.max(140, Math.round((r && r.top ? r.top : innerHeight) - 24));
+      const key = visible ? [Math.round(r.left), Math.round(r.width), Math.round(r.top), innerWidth, innerHeight, availH].join("|") : "hidden";
       if (key !== lastKey) {
         lastKey = key;
         if (visible) {
           root.classList.add("show");
-          const w = Math.max(208, r.width);
+          /* 폭은 발판 폭을 따른다. 창 크기와 무관한 208px 하한을 두지 않는다. */
+          const w = Math.max(160, r.width);
           root.style.left = r.left + "px";
           root.style.width = w + "px";
+          root.style.setProperty("--dshcal-avail", availH + "px");
           root.style.bottom = Math.max(6, innerHeight - r.top + 12) + "px";
         } else {
           root.classList.remove("show");
           /* 회전·창 크기로 모바일로 바뀌는 동안 일정 창이 열려 있으면 같이 닫는다.
              저장된 일정은 localStorage에 그대로 남고, 닫는 것은 화면에서만 사라지는 것이다. */
-          if (hide && modal.classList.contains("show")) closeModal();
+          if (!visible && modal.classList.contains("show")) closeModal();
         }
       }
       /* 숨겨져도 배치 루프는 계속 돌린다: 좁은 화면에서 다시 넓어졌을 때 앵커를 찾아 그대로 복원하려면
@@ -466,9 +506,9 @@ function apply(ctx) {
       const items = byDate(selected);
       selCntEl.textContent = items.length ? `${items.length}건` : "";
       selList.innerHTML = items.length
-        ? items.map((e) => `<div class="dshcal-li" data-id="${e.id}" title="${esc(e.title)}">
-          <em>${e.time || (e.end ? "기간" : "종일")}</em>
-          <span class="dshcal-li-t">${esc(e.title)}${e.end ? `<small>${spanLabel(e)}</small>` : ""}</span>
+        ? items.map((e) => `<div class="dshcal-li" data-id="${esc(e.id)}" title="${esc(e.title)}">
+          <em>${esc(e.time || (e.end ? "기간" : "종일"))}</em>
+          <span class="dshcal-li-t">${esc(e.title)}${e.end ? `<small>${esc(spanLabel(e))}</small>` : ""}</span>
           <button class="dshcal-li-x" type="button" data-li-del aria-label="삭제">✕</button>
         </div>`).join("")
         : `<div class="dshcal-li-empty">이 날의 일정이 없습니다</div>`;
@@ -524,7 +564,7 @@ function apply(ctx) {
     const refresh = () => { renderCal(); renderSel(); };
     listeners.add(refresh);
     life.add(() => listeners.delete(refresh));
-    life.listen(window, "storage", (ev) => { if (ev.key === STORE_KEY) { entries = loadEntries(); emit(); } });
+    life.listen(window, "storage", (ev) => { if (ev.key === null || ev.key === STORE_KEY || LEGACY_STORE_KEYS.includes(ev.key)) { entries = loadEntries(); emit(); } });
 
     renderCal(); renderSel();
   } catch (error) { dispose(); throw error; }
